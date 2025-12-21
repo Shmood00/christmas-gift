@@ -45,20 +45,27 @@ async def example():
     status = {'touch_active': False}
 
     async def pulse_led():
-        phase = 0
-        while True:
-            await asyncio.sleep_ms(20)
-            
-            is_touching = status['touch_active']
-            is_mqtt_active = time.ticks_diff(mqtt_state[0], time.ticks_ms()) > 0
-            
-            if is_touching or is_mqtt_active:
-                brightness = int((math.sin(phase)*0.5+0.5)*1023)
-                led_pwm.duty(brightness)
-                phase += 0.1
-            else:
-                led_pwm.duty(0)
-                phase = 0
+      phase = 0
+      base_brightness = 150  # Steady state brightness (approx 15%)
+      max_brightness = 1023  # Maximum pulse brightness
+      amplitude = (max_brightness - base_brightness) / 2
+      midpoint = base_brightness + amplitude
+  
+      while True:
+          await asyncio.sleep_ms(20)
+          
+          is_touching = status['touch_active']
+          is_mqtt_active = time.ticks_diff(mqtt_state[0], time.ticks_ms()) > 0
+          
+          if is_touching or is_mqtt_active:
+              # Pulses between base_brightness and max_brightness
+              brightness = int(midpoint + math.sin(phase) * amplitude)
+              led_pwm.duty(brightness)
+              phase += 0.1
+          else:
+              # Constant base brightness when idle
+              led_pwm.duty(base_brightness)
+              phase = 0
 
     asyncio.create_task(pulse_led())
     
