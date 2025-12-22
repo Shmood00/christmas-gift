@@ -14,6 +14,18 @@ async def clear_reset_flag():
   except Exception as e:
     print("[System] Error clearing flag: ",e)
 
+async def calibrate_touch(touch_pin, samples=20):
+    print("[Touch] Calibrating... do not touch the sensor.")
+    total = 0
+    for _ in range(samples):
+        total += touch_pin.read()
+        await asyncio.sleep_ms(50)
+    baseline = total // samples
+    # Set threshold to 80% of baseline. If baseline is 600, threshold is 480.
+    threshold = int(baseline * 0.8)
+    print(f"[Touch] Baseline: {baseline}, Threshold set to: {threshold}")
+    return threshold
+
 async def example():
 
     asyncio.create_task(clear_reset_flag())
@@ -27,6 +39,8 @@ async def example():
     
     led_pwm = PWM(leds)
     led_pwm.freq(500)
+
+    touch_threshold = await calibrate_touch(touch_pin)
 
     client = MQTTWebSocketClient(url, username=user, password=password, ssl_params={'cert_reqs': 0})
 
@@ -80,7 +94,7 @@ async def example():
         except ValueError:
             data = 1000
             
-        if data < 500:
+        if data < touch_threshold:
             status['touch_active'] = True
             
             # --- NEW: Rate Limit Check ---
