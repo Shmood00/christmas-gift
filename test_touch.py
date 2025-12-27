@@ -105,7 +105,7 @@ async def example():
     
     # Setup Hardware
     touch_pin = TouchPad(Pin(27))
-    led_pwm = PWM(Pin(33, Pin.OUT), freq=500)
+    led_pwm = PWM(Pin(16, Pin.OUT), freq=500)
     touch_threshold = await calibrate_touch(touch_pin)
     
     client = MQTTWebSocketClient(
