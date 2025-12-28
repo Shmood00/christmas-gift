@@ -53,6 +53,13 @@ class MQTTWebSocketClient:
         return b'mp-' + r
 
     async def connect(self):
+
+        if self.ws:
+            try:
+                await self.ws.close()
+            except:
+                pass
+        
         print('Opening websocket to', self.url)
         self.ws = AsyncWebsocketClient()
 
