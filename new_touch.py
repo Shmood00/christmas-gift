@@ -23,7 +23,7 @@ publish_deadline = 0
 mqtt_state = [0] # [pulse_deadline_ticks]
 status = {'touch_active': False}
 TOPICS = []
-VERSION = CONFIG['version']
+VERSION = CONFIG['versions']
 GITHUB_URL = CONFIG['github_url']
 
 for topic in CONFIG['sub_topics']:
