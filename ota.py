@@ -1,4 +1,3 @@
-import network
 import urequests
 import os
 import machine
@@ -10,100 +9,98 @@ import urandom
 class OTAUpdater:
     def __init__(self, repo_url, filenames):
         self.repo_url = repo_url
-        self.filenames = filenames
+        self.filenames = filenames # This is your list of files to track
 
-    def check_for_updates(self, current_version):
-        """Checks if a newer version exists on GitHub."""
+    def check_and_update(self, local_config):
+        """
+        Checks version.json and downloads only files that have a newer version.
+        Returns True if any file was updated (triggering a reboot).
+        """
+
+        if 'versions' not in local_config:
+            print("[OTA] Warning, 'versions' key missing in config. Initializing...")
+            local_config['versions'] = {}
+        
         gc.collect()
         res = None
-        # Cache Buster: Forces GitHub to serve the absolute latest file
+        updated_any = False
         cache_buster = "?cb={}".format(urandom.getrandbits(24))
         
         try:
             url = "{}/version.json{}".format(self.repo_url, cache_buster)
-            print("[OTA] Checking:", url)
+            print("[OTA] Checking for updates...")
             res = urequests.get(url, timeout=10)
             
             if res.status_code == 200:
-                data = res.json()
-                remote_version = data['version']
+                remote_versions = res.json()
+                res.close()
+
+                # Loop through every file we are tracking
+                for filename in self.filenames:
+                    # Get local version from config, default to 0.0 if not found
+                    local_ver = local_config.get('versions', {}).get(filename, 0.0)
+                    remote_ver = remote_versions.get(filename, 0.0)
+
+                    if float(remote_ver) > float(local_ver):
+                        print("[OTA] New version for {}: {} > {}".format(filename, remote_ver, local_ver))
+                        
+                        if self._download_file(filename):
+                            # Update the local version mapping in memory
+                            if 'versions' not in local_config:
+                                local_config['versions'] = {}
+                            local_config['versions'][filename] = remote_ver
+                            updated_any = True
+                    else:
+                        print("[OTA] {} is up to date ({})".format(filename, local_ver))
+
+                if updated_any:
+                    self._finalize_update(local_config)
+                    return True # Signal that a reboot is happening
+                
+            if res: res.close()
+        except Exception as e:
+            print("[OTA] Update process failed:", e)
+            if res: res.close()
+            
+        return False
+
+    def _download_file(self, filename):
+        """Internal helper to download and replace a single file."""
+        gc.collect()
+        cache_buster = "?cb={}".format(urandom.getrandbits(24))
+        res = None
+        try:
+            url = "{}/{}{}".format(self.repo_url, filename, cache_buster)
+            res = urequests.get(url, timeout=15)
+            
+            if res.status_code == 200:
+                temp_file = "tmp_{}".format(filename)
+                with open(temp_file, "w") as f:
+                    f.write(res.text)
                 res.close()
                 
-                # Compare versions as floats
-                has_update = float(remote_version) > float(current_version)
-                return has_update, remote_version
-            
-            if res: res.close()
-        except Exception as e:
-            print("[OTA] Check failed:", e)
-            if res: res.close()
-            
-        return False, current_version
-
-    def download_updates(self, new_version):
-        """Downloads all files and updates the local version config."""
-        for file in self.filenames:
-            gc.collect()
-            cache_buster = "?cb={}".format(urandom.getrandbits(24))
-            print("[OTA] Downloading {}...".format(file))
-            
-            res = None
-            try:
-                url = "{}/{}{}".format(self.repo_url, file, cache_buster)
-                res = urequests.get(url, timeout=15)
+                try: os.remove(filename)
+                except: pass
                 
-                if res.status_code == 200:
-                    # Write to a temporary file first
-                    temp_file = "tmp_{}".format(file)
-                    with open(temp_file, "w") as f:
-                        f.write(res.text)
-                    res.close()
-                    
-                    # Delete the old file to prevent rename conflicts
-                    try:
-                        os.remove(file)
-                    except:
-                        pass
-                    
-                    # Move the new file into place
-                    os.rename(temp_file, file)
-                    print("[OTA] Updated {} successfully".format(file))
-                else:
-                    print("[OTA] Error: Status {}".format(res.status_code))
-                    if res: res.close()
-                    return False
-            except Exception as e:
-                print("[OTA] Download failed for {}: {}".format(file, e))
-                if res: res.close()
-                return False
-
-        # --- Update Config Version ---
-        try:
-            config = {}
-            with open("config.json", "r") as f:
-                config = json.load(f)
-            
-            config['version'] = new_version
-            
-            with open("config.json", "w") as f:
-                json.dump(config, f)
-            print("[OTA] Config version updated to", new_version)
+                os.rename(temp_file, filename)
+                print("[OTA] Downloaded {}".format(filename))
+                return True
+            if res: res.close()
         except Exception as e:
-            print("[OTA] Failed to update config.json:", e)
-            # We don't return False here because the code files are already updated
+            print("[OTA] Error downloading {}: {}".format(filename, e))
+        return False
 
-        # --- Prepare for Reboot ---
+    def _finalize_update(self, new_config):
+        """Saves the updated config and reboots."""
         try:
-            # Create bypass flag for boot.py
+            with open("config.json", "w") as f:
+                json.dump(new_config, f)
+            
             with open(".ota_running", "w") as f:
                 f.write("1")
-        except:
-            pass
-
-        print("[OTA] All files updated. Rebooting system...")
-        
-        # Flush file system buffers and release hardware
-        gc.collect()
-        time.sleep(1.5) 
-        
-        machine.reset()
+                
+            print("[OTA] Config updated. Rebooting system...")
+            time.sleep(1.5)
+            machine.reset()
+        except Exception as e:
+            print("[OTA] Finalize failed:", e)
