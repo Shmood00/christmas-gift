@@ -27,7 +27,7 @@ class OTAUpdater:
         cache_buster = "?cb={}".format(urandom.getrandbits(24))
         
         try:
-            url = "{}/version.json{}".format(self.repo_url, cache_buster)
+            url = "{}/versions.json{}".format(self.repo_url, cache_buster)
             print("[OTA] Checking for updates...")
             res = urequests.get(url, timeout=10)
             
