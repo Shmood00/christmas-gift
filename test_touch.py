@@ -2,190 +2,171 @@ from machine import TouchPad, Pin, PWM, reset
 from ws_mqtt import MQTTWebSocketClient
 import uasyncio as asyncio
 import math, time, os, gc, json
-import senko, ntptime
 
+# 1. Configuration Loader
 def load_config():
     try:
         with open("config.json", "r") as f:
             return json.load(f)
     except:
         return {
-            "url": "", "user": "", "pass": "", 
-            "sub_topics": ["tree/cmd/update"], # Added update trigger as default
+            "url": "wss://mqtt.yourdomain.com", 
+            "user": "default", "pass": "default", 
+            "sub_topics": ["tree/cmd/update"], 
             "pub_topic": "touch_detected"
         }
 
-# Configuration and State
 CONFIG = load_config()
-URL = CONFIG['url']
-USER = CONFIG['user']
-PASS = CONFIG['pass']
-TOPICS = CONFIG['sub_topics']
-
-publish_deadline = 0
 mqtt_state = [0] 
 status = {'touch_active': False}
-ota_requested = False  # Global flag for update trigger
+ota_requested = False 
+publish_deadline = 0
 
-OTA = senko.Senko(
-  user="Shmood00",
-  repo="christmas-gift",
-  branch="main",
-  working_dir="",
-  files=["test_touch.py"] # Ensure this matches your local filename (usually main.py)
-)
-
+# 2. Optimized NTP Sync
 async def sync_time():
-    print("[System] Syncing time via NTP...")
+    import ntptime
+    print("[System] Syncing time...")
     try:
         ntptime.settime()
-        print("[System] Time synced successfully:", time.localtime())
-    except Exception as e:
-        print("[System] Time sync failed:", e)
+        print("[System] Time synced")
+    except:
+        print("[System] NTP failed")
+    gc.collect()
 
-async def clear_reset_flag():
-    # Wait 10 seconds to ensure system stability before clearing flag
-    await asyncio.sleep(10)
+# 3. Direct OTA Download (The "Force" Method)
+async def force_update_file(filename):
+    import urequests
+    # Cache buster to ensure GitHub doesn't serve old code
+    url = f"https://raw.githubusercontent.com/Shmood00/christmas-gift/main/{filename}?cb={time.ticks_ms()}"
+    
+    print(f"[OTA] Pulling {filename}...")
     try:
-        if ".reset_flag" in os.listdir():
-            os.remove(".reset_flag")
-            print("[System] Stable. Reset flag cleared")
+        res = urequests.get(url, timeout=15)
+        if res.status_code == 200:
+            new_code = res.text
+            res.close()
+            with open(filename, "w") as f:
+                f.write(new_code)
+            return True
+        else:
+            print(f"[OTA] HTTP Error: {res.status_code}")
+            res.close()
     except Exception as e:
-        print("[System] Error clearing flag: ", e)
+        print(f"[OTA] Request failed: {e}")
+    return False
 
-async def calibrate_touch(touch_pin, samples=20):
-    print("[Touch] Calibrating...")
-    total = 0
-    for _ in range(samples):
-        total += touch_pin.read()
-        await asyncio.sleep_ms(50)
-    baseline = total // samples
-    threshold = int(baseline * 0.8)
-    print(f"[Touch] Baseline: {baseline}, Threshold: {threshold}")
-    return threshold
-
+# 4. MQTT Callbacks
 async def on_msg(topic, payload):
     global ota_requested
     t = topic.decode()
     p = payload.decode()
-    print(f"[MQTT] Received: {t} -> {p}")
+    print(f"MQTT: {t} -> {p}")
     
-    # 1. Check for OTA Trigger
     if t == 'tree/cmd/update' or p == 'update':
-        print("[System] OTA Update Request Received!")
         ota_requested = True
-        
-    # 2. Handle Pulse Logic
-    elif t in TOPICS:
+    elif t in CONFIG['sub_topics']:
         mqtt_state[0] = time.ticks_add(time.ticks_ms(), 5000)
 
 async def pulse_led(led_pwm):
     phase = 0
     while True:
         await asyncio.sleep_ms(20)
-        is_touching = status['touch_active']
-        is_mqtt_active = time.ticks_diff(mqtt_state[0], time.ticks_ms()) > 0
-        
-        if is_touching or is_mqtt_active:
-            brightness = int((math.sin(phase)*0.5+0.5)*1023)
-            led_pwm.duty(brightness)
+        is_active = status['touch_active'] or time.ticks_diff(mqtt_state[0], time.ticks_ms()) > 0
+        if is_active:
+            led_pwm.duty(int((math.sin(phase)*0.5+0.5)*1023))
             phase += 0.1
         else:
             led_pwm.duty(0)
             phase = 0
 
-async def example():
+# 5. The Main Logic
+async def main_loop():
     global publish_deadline, ota_requested
-
+    
     await sync_time()
-    # Note: check_for_updates() on boot removed to prevent asyncio hanging.
-    # Updates are now handled via MQTT trigger in the loop below.
     
-    asyncio.create_task(clear_reset_flag())
+    # Safe Mode Cleanup: Delete flag after 10s of stability
+    async def clear_flag():
+        await asyncio.sleep(10)
+        if ".reset_flag" in os.listdir():
+            os.remove(".reset_flag")
+            print("[System] Reset flag cleared.")
+    asyncio.create_task(clear_flag())
     
-    # Setup Hardware
+    # Hardware
     touch_pin = TouchPad(Pin(27))
-    led_pwm = PWM(Pin(16, Pin.OUT), freq=500)
-    touch_threshold = await calibrate_touch(touch_pin)
+    led_pwm = PWM(Pin(33, Pin.OUT), freq=500)
     
+    # Calibration
+    print("[Touch] Calibrating...")
+    total = 0
+    for _ in range(20):
+        total += touch_pin.read()
+        await asyncio.sleep_ms(50)
+    touch_threshold = int((total // 20) * 0.8)
+
     client = MQTTWebSocketClient(
-        URL, username=USER, password=PASS, 
+        CONFIG['url'], username=CONFIG['user'], password=CONFIG['pass'], 
         ssl_params={'cert_reqs': 0}, keepalive=30 
     )
     client.set_callback(on_msg)
-
     asyncio.create_task(pulse_led(led_pwm))
 
-    print("[System] Starting Main Loop...")
-    loop_count = 0
-
     while True:
-        loop_count += 1
-        
-        # 1. Handle OTA Request (Interrupts normal loop)
+        # OTA Triggered?
         if ota_requested:
-            print("[OTA] Stopping MQTT and starting update...")
             try: await client.disconnect()
             except: pass
             gc.collect()
             
-            try:
-                if OTA.update():
-                    print("[OTA] Update Success! Rebooting...")
-                    reset()
-                else:
-                    print("[OTA] No changes found on GitHub.")
-            except Exception as e:
-                print(f"[OTA] Error: {e}")
-            
-            ota_requested = False # Reset flag and resume if update failed/skipped
+            # Since this file IS main.py, we download to main.py
+            if await force_update_file("test_touch.py"): 
+                # Rename the downloaded file to main.py immediately
+                os.rename("test_touch.py", "main.py")
+                print("[OTA] Updated main.py. Rebooting...")
+                await asyncio.sleep(1)
+                reset()
+            else:
+                ota_requested = False
 
-        # 2. Maintain MQTT Connection
+        # Connection management
         if not client._connected:
+            gc.collect()
             try:
                 await client.connect()
-                for topic in TOPICS:
+                for topic in CONFIG['sub_topics']:
                     await client.subscribe(topic)
-                # Auto-subscribe to the update command topic
                 await client.subscribe('tree/cmd/update')
-                print("[MQTT] Connected and Ready")
-                gc.collect()
+                print("[MQTT] Connected.")
             except Exception as e:
-                print(f"[MQTT] Failed: {e}. Retrying...")
+                print(f"[MQTT] Error: {e}")
                 await asyncio.sleep(5)
                 continue
 
-        # 3. Touch Logic
+        # Touch Logic
         try:
-            data = touch_pin.read()
-            if data < touch_threshold:
+            if touch_pin.read() < touch_threshold:
                 status['touch_active'] = True
                 if time.ticks_diff(time.ticks_ms(), publish_deadline) > 0:
-                    await client.publish(CONFIG['pub_topic'], str(data))
+                    await client.publish(CONFIG['pub_topic'], "1")
                     publish_deadline = time.ticks_add(time.ticks_ms(), 5000)
             else:
                 status['touch_active'] = False
-        except Exception as e:
+        except:
             client._connected = False
-
-        # 4. Cleanup
-        if loop_count % 100 == 0:
-            gc.collect()
-            print(f"[Health] Free RAM: {gc.mem_free()}")
-            loop_count = 0
 
         await asyncio.sleep_ms(50)
 
 if __name__ == '__main__':
+    # Double reset protection
     if ".reset_flag" in os.listdir():
-        print("!!! SAFE MODE ACTIVE !!!")
+        print("SAFE MODE: Delaying 15s...")
         time.sleep(15)
     
     try:
-        gc.threshold(gc.mem_free() // 4 + gc.mem_alloc())
         gc.collect()
-        asyncio.run(example())
+        asyncio.run(main_loop())
     except Exception as e:
-        print('Fatal Error:', e)
+        print('Fatal:', e)
         time.sleep(5)
         reset()
