@@ -1,19 +1,25 @@
 from machine import TouchPad, Pin, PWM
 from ws_mqtt import MQTTWebSocketClient
 import uasyncio as asyncio
-import math, time, os, gc
+import math, time, os, gc, json
+
+# --- 1. CONFIG & GLOBALS ---
+def load_config():
+    try:
+        with open("config.json", "r") as f:
+            return json.load(f)
+    except:
+        return {"url": "", "user": "", "pass": "", "sub_topics": [], "pub_topic": "touch"}
 
 # Configuration
-URL = 'wss://mqtt.domain.org:443/'
-USER = 'user'
-PASS = 'password'
-TOPICS = [
-  'topic'
-]
-
+CONFIG = load_config()
 publish_deadline = 0
 mqtt_state = [0] # [pulse_deadline_ticks]
 status = {'touch_active': False}
+TOPICS = []
+
+for topic in CONFIG['sub_topics']:
+  TOPICS.append(topic)
 
 async def clear_reset_flag():
     await asyncio.sleep(5)
@@ -71,9 +77,9 @@ async def example():
     
     # Initialize MQTT Client with aggressive 30s KeepAlive for Cloudflare
     client = MQTTWebSocketClient(
-        URL, 
-        username=USER, 
-        password=PASS, 
+        CONFIG['url'], 
+        username=CONFIG['user'], 
+        password=CONFIG['pass'], 
         ssl_params={'cert_reqs': 0},
         keepalive=30 
     )
@@ -116,7 +122,7 @@ async def example():
                 # Rate Limit Publishing
                 if time.ticks_diff(time.ticks_ms(), publish_deadline) > 0:
                     print(f"[MQTT] Publishing touch event: {data}")
-                    await client.publish('touch_detected', str(data))
+                    await client.publish(CONFIG['pub_topic'], str(data))
                     publish_deadline = time.ticks_add(time.ticks_ms(), 5000)
             else:
                 status['touch_active'] = False
