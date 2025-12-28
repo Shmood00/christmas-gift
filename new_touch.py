@@ -11,11 +11,43 @@ FILES_TO_UPDATE = [
 
 # --- 1. CONFIG & GLOBALS ---
 def load_config():
-    try:
-        with open("config.json", "r") as f:
-            return json.load(f)
-    except:
-        return {"url": "", "user": "", "pass": "", "sub_topics": [], "pub_topic": "touch"}
+    # Helper for hardware-locked decryption
+    def _decrypt(data):
+        import machine
+        key = machine.unique_id()
+        return bytes([data[i] ^ key[i % len(key)] for i in range(len(data))])
+
+    # 1. Try Encrypted File
+    if "config.dat" in os.listdir():
+        try:
+            with open("config.dat", "rb") as f:
+                raw_binary = f.read()
+            
+            # Decrypt and Parse
+            decrypted_str = _decrypt(raw_binary).decode('utf-8')
+            config_data = json.loads(decrypted_str)
+            
+            print("[System] Success: Loaded encrypted config.")
+            return config_data
+        except Exception as e:
+            print("[System] Failed to decrypt .dat file:", e)
+
+    # 2. Try Plaintext Fallback (Only for initial setup)
+    if "config.json" in os.listdir():
+        try:
+            with open("config.json", "r") as f:
+                print("[System] Loading from plaintext config.json")
+                return json.load(f)
+        except Exception as e:
+            print("[System] Failed to read .json file:", e)
+
+    # 3. Emergency Default (Ensures the rest of the script doesn't crash)
+    print("[System] CRITICAL: No config found! Using empty defaults.")
+    return {
+        "url": "", "user": "", "pass": "", 
+        "sub_topics": [], "pub_topic": "touch", 
+        "versions": {}, "github_url": ""
+    }
 
 # Configuration
 CONFIG = load_config()
@@ -72,9 +104,17 @@ async def pulse_led(led_pwm):
             phase = 0
 
 async def example():
+
+    try:
+      if ".reset_flag" in os.listdir():
+        os.remove(".reset_flag")
+        print("[System] Stability confirmed. Flag removed")
+    except:
+      pass
+  
     global publish_deadline
 
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
     gc.collect()
     
     ota = OTAUpdater(GITHUB_URL, FILES_TO_UPDATE)
