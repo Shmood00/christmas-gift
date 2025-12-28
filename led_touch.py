@@ -2,12 +2,19 @@ from machine import TouchPad, Pin, PWM
 from ws_mqtt import MQTTWebSocketClient
 import uasyncio as asyncio
 import math, time, os, gc, json
+from ota import OTAUpdater
+
+FILES_TO_UPDATE = [
+  "main.py",
+  "led_touch.py"
+]
 
 # --- 1. CONFIG & GLOBALS ---
 def load_config():
     try:
         with open("config.json", "r") as f:
             return json.load(f)
+        print("[System] Local config loaded")
     except:
         return {"url": "", "user": "", "pass": "", "sub_topics": [], "pub_topic": "touch"}
 
@@ -17,6 +24,8 @@ publish_deadline = 0
 mqtt_state = [0] # [pulse_deadline_ticks]
 status = {'touch_active': False}
 TOPICS = []
+VERSION = CONFIG['version']
+GITHUB_URL = CONFIG['github_url']
 
 for topic in CONFIG['sub_topics']:
   TOPICS.append(topic)
@@ -65,7 +74,20 @@ async def pulse_led(led_pwm):
 
 async def example():
     global publish_deadline
+
+    await asyncio.sleep(2)
+    gc.collect()
+    
     asyncio.create_task(clear_reset_flag())
+
+    ota = OTAUpdater(GITHUB_URL, FILES_TO_UPDATE)
+    update_needed, latest = ota.check_for_updates(VERSION)
+
+    if update_needed:
+        print(f"[OTA] New version {latest} detected. Starting download...")
+        ota.download_updates(latest) # This function will reboot the device if successful
+    else:
+        print(f"[OTA] No updates found. Running Version {VERSION}")
     
     # Setup Hardware
     touch_pin = TouchPad(Pin(27))
