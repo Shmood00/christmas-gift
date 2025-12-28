@@ -4,7 +4,10 @@ import uasyncio as asyncio
 import math, time, os, gc, json
 from ota import OTAUpdater
 
-FILES_TO_UPDATE = ["main.py"]
+FILES_TO_UPDATE = [
+  "main.py",
+  "led_touch.py"
+]
 
 # --- 1. CONFIG & GLOBALS ---
 def load_config():
@@ -74,17 +77,14 @@ async def example():
     await asyncio.sleep(2)
     gc.collect()
     
-    asyncio.create_task(clear_reset_flag())
-
     ota = OTAUpdater(GITHUB_URL, FILES_TO_UPDATE)
-    update_needed, latest = ota.check_for_updates(VERSION)
+    update_triggered = ota.check_and_update(CONFIG)
 
-    if update_needed:
-        print(f"[OTA] New version {latest} detected. Starting download...")
-        ota.download_updates(latest) # This function will reboot the device if successful
-    else:
-        print(f"[OTA] No updates found. Running Version {VERSION}")
-    
+    if update_triggered:
+        return
+
+    asyncio.create_task(clear_reset_flag())
+      
     # Setup Hardware
     touch_pin = TouchPad(Pin(27))
     leds = Pin(33, Pin.OUT)
