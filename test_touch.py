@@ -83,7 +83,7 @@ async def main_loop():
 
     # Hardware
     touch_pin = TouchPad(Pin(27))
-    led_pwm = PWM(Pin(33, Pin.OUT), freq=500)
+    led_pwm = PWM(Pin(16, Pin.OUT), freq=500)
     
     client = MQTTWebSocketClient(
         CONFIG['url'], username=CONFIG['user'], password=CONFIG['pass'], 
