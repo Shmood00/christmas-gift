@@ -39,7 +39,7 @@ class OTAUpdater:
         try:
             url = "{}/versions.json{}".format(self.repo_url, cache_buster)
             print("[OTA] Checking for updates...")
-            res = urequests.get(url, timeout=10)
+            res = urequests.get(url, timeout=10, headers={'Cache-Control':'no-cache'})
             
             if res.status_code == 200:
                 remote_versions = res.json()
