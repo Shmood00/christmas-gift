@@ -83,8 +83,18 @@ async def calibrate_touch(touch_pin, samples=20):
     return threshold
 
 async def on_msg(topic, payload):
-    # Added print for debugging
-    print(f"[MQTT] Message received! Topic: {topic.decode()}, Payload: {payload.decode()}")
+    t = topic.decode()
+    p = payload.decode()
+    print(f"[MQTT] Message received! Topic: {t}, Payload: {p}")
+    
+    # Simple Reboot Trigger for Updates
+    if t == "tree/cmd/update":
+        import machine
+        print("[System] Reboot command received. Restarting to check for updates...")
+        # Give the system a moment to finish any pending tasks
+        await asyncio.sleep(0.5)
+        machine.reset()
+
     # Existing logic for extending the pulse deadline
     mqtt_state[0] = time.ticks_add(time.ticks_ms(), 5000)
 
