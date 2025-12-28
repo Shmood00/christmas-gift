@@ -1,6 +1,6 @@
 # wifimanager.py
-# Modified WifiManager: captive DNS + redirect probe handling so captive webview opens portal root
-# Author: adapted from Igor Ferreira, modifications by ChatGPT + Gemini
+# Modified WifiManager: captive DNS + redirect probe handling + XOR Hardware Encryption
+# Author: adapted from Igor Ferreira, modifications by Gemini
 # License: MIT
 
 import machine
@@ -36,7 +36,7 @@ class WifiManager:
             self.ap_password = ''
             self.ap_authmode = 0  # open
 
-        # credentials storage
+        # credentials storage (using .dat for binary encrypted data)
         self.wifi_credentials = 'wifi.dat'
 
         # prevent auto connect until we explicitly do so
@@ -63,6 +63,57 @@ class WifiManager:
         except Exception as e:
             if self.debug:
                 print("[wm] AP init failed:", e)
+
+    # -----------------
+    # XOR Encryption Helpers
+    # -----------------
+    def _xor_crypt(self, data):
+        """Encrypts/Decrypts data using the ESP32's unique hardware ID."""
+        key = machine.unique_id()
+        return bytes([data[i] ^ key[i % len(key)] for i in range(len(data))])
+
+    def write_credentials(self, profiles):
+        """Encrypts and writes credentials as binary data."""
+        try:
+            with open(self.wifi_credentials, 'wb') as f:
+                for ssid, password in profiles.items():
+                    # Format as bytes, then XOR
+                    plain_line = '{0};{1}\n'.format(ssid, password).encode('utf-8')
+                    encrypted_line = self._xor_crypt(plain_line)
+                    
+                    # Store block length (1 byte) followed by the encrypted data
+                    f.write(bytes([len(encrypted_line)]))
+                    f.write(encrypted_line)
+            if self.debug:
+                print("[wm] Encrypted credentials saved.")
+        except Exception as e:
+            print("[wm] Error saving credentials:", e)
+
+    def read_credentials(self):
+        """Reads binary data and decrypts it using the hardware key."""
+        profiles = {}
+        try:
+            with open(self.wifi_credentials, 'rb') as f:
+                while True:
+                    length_byte = f.read(1)
+                    if not length_byte:
+                        break
+                    
+                    length = length_byte[0]
+                    encrypted_data = f.read(length)
+                    
+                    # Decrypt and turn back into a string
+                    decrypted_line = self._xor_crypt(encrypted_data).decode('utf-8')
+                    
+                    try:
+                        ssid, password = decrypted_line.strip().split(';')
+                        profiles[ssid] = password
+                    except:
+                        continue
+        except Exception as e:
+            if self.debug:
+                print("[wm] No credentials found or read error:", e)
+        return profiles
 
     # -----------------
     # DNS server thread to answer all queries with AP IP
@@ -145,30 +196,6 @@ class WifiManager:
     def get_address(self):
         return self.wlan_sta.ifconfig()
 
-    def write_credentials(self, profiles):
-        lines = []
-        for ssid, password in profiles.items():
-            lines.append('{0};{1}\n'.format(ssid, password))
-        with open(self.wifi_credentials, 'w') as f:
-            f.write(''.join(lines))
-
-    def read_credentials(self):
-        lines = []
-        try:
-            with open(self.wifi_credentials) as f:
-                lines = f.readlines()
-        except Exception as e:
-            if self.debug:
-                print("[wm] read_credentials error:", e)
-        profiles = {}
-        for line in lines:
-            try:
-                ssid, password = line.strip().split(';')
-                profiles[ssid] = password
-            except Exception:
-                continue
-        return profiles
-
     def wifi_connect(self, ssid, password):
         print('Trying to connect to:', ssid)
         try:
@@ -210,13 +237,10 @@ class WifiManager:
 
         try:
             self.wlan_ap.active(True)
-
             self.wlan_ap.config(essid=self.ap_ssid, password=self.ap_password, authmode=self.ap_authmode)
             self.wlan_ap.ifconfig((self.ap_ip, self.ap_netmask, self.ap_gateway, self.ap_dns))
-
             time.sleep_ms(200)
             self.wlan_ap.active(True)
-
         except Exception as e:
             if self.debug:
                 print("[wm] ap.active(True) failed:", e)
@@ -234,9 +258,6 @@ class WifiManager:
         print('Connect to', self.ap_ssid, 'and open the captive portal at', self.ap_ip)
 
         while True:
-            # -----------------
-            # 1. Check for connection success/reboot
-            # -----------------
             try:
                 if self.wlan_sta.isconnected():
                     try:
@@ -244,7 +265,6 @@ class WifiManager:
                     except:
                         pass
                     if self.reboot:
-                        
                         print('The device will reboot in 5 seconds.')
                         time.sleep(5)
                         machine.reset()
@@ -253,14 +273,9 @@ class WifiManager:
             except Exception:
                 pass
 
-            # -----------------
-            # 2. Check for new credentials (DECOUPLED)
-            # -----------------
             if self.new_credentials_to_try:
                 ssid, password = self.new_credentials_to_try
-                self.new_credentials_to_try = None # Clear immediately
-
-                # Blocking connect call is now HERE
+                self.new_credentials_to_try = None 
                 connected = self.wifi_connect(ssid, password)
 
                 if connected:
@@ -268,16 +283,11 @@ class WifiManager:
                     profiles = self.read_credentials()
                     profiles[ssid] = password
                     self.write_credentials(profiles)
-                    # The outer `if self.wlan_sta.isconnected():` block will now handle the reboot.
                 else:
                     print(f"Connection to {ssid} failed. Restarting AP for re-configuration.")
-                    time.sleep(1) # Give it a moment
+                    time.sleep(1) 
+                continue 
 
-                continue # Go back to top of loop (to check connection status)
-
-            # -----------------
-            # 3. Handle incoming HTTP requests
-            # -----------------
             try:
                 client, addr = server_socket.accept()
             except Exception as e:
@@ -296,7 +306,6 @@ class WifiManager:
                         request += chunk
                         if b'\r\n\r\n' in request:
                             try:
-                                # Try to grab body if POST, but don't block
                                 request += client.recv(512)
                             except:
                                 pass
@@ -319,7 +328,6 @@ class WifiManager:
                 if self.debug:
                     print("[wm] REQ:\n", req_text)
 
-                # Handle captive portal detection
                 if "captive.apple.com" in req_text or "generate_204" in req_text or "connectivitycheck" in req_text:
                     self._send_redirect(client, "http://{}/".format(self.ap_ip))
                     continue
@@ -506,26 +514,18 @@ class WifiManager:
     <form action="/configure" method="get">
         <div class="ssid-list-box">
 """
-        # Scan for networks and build the list
         try:
             networks = []
             for ssid, *_ in self.wlan_sta.scan():
                 networks.append(ssid.decode("utf-8"))
-
             if not networks:
                  body += "<p style='text-align: center; color: #aaa;'>No networks found.<br>Scanning...</p>"
-
-            # Sort networks alphabetically for consistent display
             networks.sort()
-
             for ssid in networks:
-                # Format each network as a radio button and label
                 body += '<div class="network-item"><input type="radio" name="ssid" value="{0}" id="{0}"><label for="{0}">{0}</label></div>\n'.format(ssid)
         except Exception:
             body += "<p style='text-align: center; color: #aaa;'>Error scanning networks.</p>"
-            pass
 
-        # Add the password input and submit button
         body += """
         </div>
         <input type="password" name="password" placeholder="Enter password...">
@@ -534,36 +534,29 @@ class WifiManager:
 </div>
 </body>
 </html>
-""".format(ip=self.ap_ip)
-
-        # Send the response
+"""
         self._send_response(client, body)
 
     def _handle_configure(self, client, request_bytes):
         try:
             decoded = self.url_decode(request_bytes)
-            # Handle both GET (form) and POST
             match = re.search(b"ssid=([^&]*)&password=([^& ]*)", decoded)
             if match:
                 try:
                     ssid = match.group(1).decode("utf-8")
                 except:
-                    ssid = "" # Handle decoding errors
+                    ssid = ""
                 try:
                     password = match.group(2).decode("utf-8")
                 except:
-                    password = "" # Handle decoding errors
+                    password = ""
 
                 if len(ssid) == 0:
                     self._send_response(client, "<p>SSID must be provided!</p>", status_code=400)
                     return
 
-                # --- MODIFIED LOGIC ---
-                # Store credentials to be tried in the main loop
-
                 self.new_credentials_to_try = (ssid, password)
 
-                # Send a non-blocking "Connecting..." page
                 body = """<!DOCTYPE html>
 <html>
 <head>
@@ -573,18 +566,18 @@ class WifiManager:
 <style>
     body {{
         font-family: -apple-system, system-ui, sans-serif;
-        background-color: #1a1a1a; /* Dark background */
-        color: #f0f0f0; /* Light text */
+        background-color: #1a1a1a;
+        color: #f0f0f0;
         margin: 0;
         padding: 20px;
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: flex-start; /* FIX: Shifts content to the top */
+        justify-content: flex-start;
         min-height: 100vh;
         box-sizing: border-box;
         text-align: center;
-        padding-top: 50px; /* Added some top margin for spacing */
+        padding-top: 50px;
     }}
     h1 {{
         color: #f0f0f0;
@@ -593,15 +586,15 @@ class WifiManager:
     }}
     p {{
         font-size: 16px;
-        color: #aaa; /* Subdued color */
+        color: #aaa;
         margin: 5px 0;
     }}
     strong {{
-        color: #007aff; /* Highlight the SSID */
+        color: #007aff;
     }}
     .spinner {{
-        border: 4px solid rgba(255, 255, 255, 0.2); /* Light grey border */
-        border-left-color: #007aff; /* Blue spinner color */
+        border: 4px solid rgba(255, 255, 255, 0.2);
+        border-left-color: #007aff;
         border-radius: 50%;
         width: 40px;
         height: 40px;
@@ -622,7 +615,6 @@ class WifiManager:
 </body>
 </html>""".format(ssid)
                 self._send_response(client, body)
-                # --- END MODIFIED LOGIC ---
                 return
             else:
                 self._send_response(client, "<p>Parameters not found!</p>", status_code=400)
@@ -640,18 +632,12 @@ class WifiManager:
     def _handle_not_found(self, client):
         self._send_response(client, "<p>Page not found!</p>", status_code=404)
 
-    # -----------------
-    # URL decode helper
-    # -----------------
     def url_decode(self, url_string):
         if not url_string:
             return b''
         if isinstance(url_string, str):
             url_string = url_string.encode('utf-8')
-
-        # Replace '+' with space
         url_string = url_string.replace(b'+', b' ')
-
         bits = url_string.split(b'%')
         if len(bits) == 1:
             return url_string
