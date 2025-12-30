@@ -9,103 +9,97 @@ import urandom
 class OTAUpdater:
     def __init__(self, repo_url, filenames):
         self.repo_url = repo_url
-        self.filenames = filenames 
+        self.filenames = filenames
 
     def _xor_crypt(self, data):
         if isinstance(data, str):
-            data = data.encode('utf-8')
+            data = data.encode()
         key = machine.unique_id()
         return bytes([data[i] ^ key[i % len(key)] for i in range(len(data))])
 
     def check_and_update(self, local_config):
-        if not isinstance(local_config, dict):
-            print("[OTA] Error: local_config is not a dictionary")
-            return False
-        if 'versions' not in local_config:
-            local_config['versions'] = {}
-        
+        if "versions" not in local_config:
+            local_config["versions"] = {}
+
         gc.collect()
-        res = None
-        updated_any = False
-        cache_buster = "?cb={}".format(urandom.getrandbits(24))
-        
+        updated = False
+        cb = urandom.getrandbits(24)
+
         try:
-            url = "{}/versions.json{}".format(self.repo_url, cache_buster)
+            url = f"{self.repo_url}/versions.json?cb={cb}"
             print("[OTA] Checking for updates...")
-            res = urequests.get(url, timeout=10)
-            
-            if res.status_code == 200:
-                remote_versions = res.json()
-                res.close()
 
-                for filename in self.filenames:
-                    local_ver = local_config.get('versions', {}).get(filename, 0.0)
-                    remote_ver = remote_versions.get(filename, 0.0)
+            start = time.ticks_ms()
+            res = urequests.get(url)
+            if time.ticks_diff(time.ticks_ms(), start) > 8000:
+                raise Exception("HTTP timeout")
 
-                    if float(remote_ver) > float(local_ver):
-                        print("[OTA] Update found for {}: {} > {}".format(filename, remote_ver, local_ver))
-                        if self._download_file(filename):
-                            local_config['versions'][filename] = remote_ver
-                            updated_any = True
-                    else:
-                        print("[OTA] {} is up to date.".format(filename))
+            remote = res.json()
+            res.close()
 
-                if updated_any:
-                    self._finalize_update(local_config)
-                    return True 
-            if res: res.close()
+            for fname in self.filenames:
+                local = local_config["versions"].get(fname, 0)
+                remote_v = remote.get(fname, 0)
+
+                if float(remote_v) > float(local):
+                    print(f"[OTA] Updating {fname}")
+                    if self._download_file(fname):
+                        local_config["versions"][fname] = remote_v
+                        updated = True
+                else:
+                    print(f"[OTA] {fname} OK")
+
+            if updated:
+                self._finalize_update(local_config)
+                return True
+
         except Exception as e:
-            print("[OTA] Update failed:", e)
-            if res: res.close()
+            print("[OTA] Failed:", e)
+
         return False
 
     def _download_file(self, filename):
-        """Streaming download to prevent ENOMEM crashes."""
         gc.collect()
-        res = None
         try:
-            url = "{}/{}".format(self.repo_url, filename)
-            res = urequests.get(url, timeout=15, stream=True)
+            url = f"{self.repo_url}/{filename}"
+            res = urequests.get(url, stream=True)
             if res.status_code == 200:
-                temp_file = "tmp_{}".format(filename)
-                with open(temp_file, "wb") as f:
+                tmp = f"tmp_{filename}"
+                with open(tmp, "wb") as f:
                     while True:
                         chunk = res.raw.read(128)
-                        if not chunk: break
+                        if not chunk:
+                            break
                         f.write(chunk)
                 res.close()
-                try: os.remove(filename)
-                except: pass
-                os.rename(temp_file, filename)
+                try:
+                    os.remove(filename)
+                except:
+                    pass
+                os.rename(tmp, filename)
                 return True
-        except: pass
-        finally:
-            if res: res.close()
+        except:
+            pass
         return False
 
-    def _finalize_update(self, new_config):
-        """Atomic save and create OTA bypass flag for boot.py."""
+    def _finalize_update(self, config):
         try:
             print("[OTA] Saving config...")
-            plain_data = json.dumps(new_config)
-            encrypted_data = self._xor_crypt(plain_data)
-            
-            # Write to temp file first
+            enc = self._xor_crypt(json.dumps(config))
             with open("config.dat.tmp", "wb") as f:
-                f.write(encrypted_data)
-            
-            # Rename temp to real (Atomic Swap)
-            try: os.remove("config.dat")
-            except: pass
+                f.write(enc)
+            try:
+                os.remove("config.dat")
+            except:
+                pass
             os.rename("config.dat.tmp", "config.dat")
-            
-            # --- CRITICAL ADDITION FOR YOUR BOOT.PY ---
+
             with open(".ota_running", "w") as f:
                 f.write("1")
-            # ------------------------------------------
 
-            print("[OTA] Update complete. Rebooting safely...")
+            print("[OTA] Rebooting...")
             time.sleep(1)
             machine.reset()
+
         except Exception as e:
-            print("[OTA] Save failed:", e)
+            print("[OTA] Finalize failed:", e)
